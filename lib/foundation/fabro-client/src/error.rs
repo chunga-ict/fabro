@@ -152,7 +152,7 @@ where
             build_structured_error(anyhow!("request failed with status {status}"), status, None)
         }
         progenitor_client::Error::InvalidResponsePayload(body, source) => StructuredApiError {
-            error:   schema_mismatch_error(&body, &source),
+            error:   schema_mismatch_error(&body, source),
             failure: None,
         },
         other => StructuredApiError {
@@ -171,7 +171,7 @@ const SCHEMA_MISMATCH_BODY_PREVIEW: usize = 200;
 /// this CLI was generated against. In practice that nearly always means the
 /// two are on different versions, so lead with that rather than dumping the
 /// whole body and leaving the reader to guess.
-fn schema_mismatch_error(body: &[u8], source: &serde_json::Error) -> anyhow::Error {
+fn schema_mismatch_error(body: &[u8], source: serde_json::Error) -> anyhow::Error {
     let text = String::from_utf8_lossy(body);
     let preview: String = text.chars().take(SCHEMA_MISMATCH_BODY_PREVIEW).collect();
     let ellipsis = if text.chars().nth(SCHEMA_MISMATCH_BODY_PREVIEW).is_some() {
@@ -180,14 +180,14 @@ fn schema_mismatch_error(body: &[u8], source: &serde_json::Error) -> anyhow::Err
         ""
     };
 
-    anyhow!(
-        "server response did not match the schema this CLI expects: {source}\n\n\
+    anyhow::Error::new(source).context(format!(
+        "server response did not match the schema this CLI expects.\n\n\
          This usually means the CLI and the server are running different versions. \
          This CLI is {FABRO_VERSION}; run `fabro version` to compare it with the server, \
          then upgrade the older side with `fabro upgrade` (add `--prerelease` if the \
          server runs a nightly build).\n\n\
          Response body started with: {preview}{ellipsis}"
-    )
+    ))
 }
 
 pub fn map_api_error<E>(err: progenitor_client::Error<E>) -> anyhow::Error
@@ -347,12 +347,27 @@ mod tests {
     }
 
     #[test]
+    fn schema_mismatch_preserves_json_decoding_error() {
+        let err = map_api_error(invalid_payload_error(r#"{"title":"some run"}"#));
+        let source = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<serde_json::Error>())
+            .expect("the JSON decoding error should remain in the source chain");
+
+        assert!(source.is_data());
+        assert!(format!("{err:#}").contains(&source.to_string()));
+    }
+
+    #[test]
     fn schema_mismatch_truncates_the_response_body() {
         let body = format!(r#"{{"title":"{}"}}"#, "x".repeat(5_000));
         let err = map_api_error(invalid_payload_error(&body));
-        let rendered = format!("{err}");
+        let rendered = format!("{err:#}");
 
-        assert!(rendered.contains("Response body started with:"), "{rendered}");
+        assert!(
+            rendered.contains("Response body started with:"),
+            "{rendered}"
+        );
         assert!(rendered.contains("..."), "{rendered}");
         assert!(
             rendered.len() < 1_000,
